@@ -26,3 +26,543 @@ Functions used:
 rxOptions() - the parameter numCoresToUse is used to specify the number of cores to be used by the script
 */
 
+# start time for the script
+t_start <- Sys.time()
+
+# set directory
+dataDir <- '/home/ratul'
+
+# set home directory accordingly
+home <- '/home/ratul/MRS/benchmarking/Test_Runs/Run9'
+setwd(home)
+
+# use 8 cores for all the below calculations
+rxOptions(numCoresToUse = 8)
+
+# set libraries
+library(MicrosoftML)
+library(RevoScaleR)
+
+/*
+Dataset: 17 M rows X 102 columns
+
+A random sample of the dataset showed columns that has more than 40% null values. All those variables were removed (14 variables). Information Value calculation on the radom sample showed that 22 variables were very weak predictors (IV < 0.02). Hence those variables were also removed. Remaining variables = 102 - 14 - 22 = 66.
+
+This set of 66 variables includes the target variable 'delinq'
+
+N.B.: Please note that all the above data manipulations are specific to this dataset at hand and hence not included in the benchmarking exercise. Please refer to the end of the script for details.
+*/
+
+/* 
+1.2. Declare datatypes of all variables to be used in the model
+*/
+
+# specific variables to keep after variable selection
+varsToKeep <- c('Variable_Name_1','Variable_Name_2','delinq')
+
+# specific data type of column
+colInfo <- list( Variable_Name_1 = list(type='factor'), Variable_Name_2 = list(type='integer'), delinq = list(type='factor'))
+
+# list of variables which are factors
+factorVars <- c('Variable_Name_1','delinq')
+
+/*
+1.3. Write data from csv to xdf
+Functions Used:
+
+rxImport() - to write data from csv to xdf. 
+xdf (eXternal Data Frame) is the native file format of Microsoft R that stores data in a compressed format in chunks, so that while loading into memory, the whole data need not stay in RAM and chunk wise operations can be performed.
+Parameters:
+
+inData - file path of csv or xdf 
+outFile - file path of xdf (if outFile is omitted, then inData is loaded into RAM) 
+varsToKeep/varsToDrop - name of variables to import/not import 
+colInfo - name of variables and their specific data types (This can be used to convert strings/character variables to factors if need be) 
+rowsPerRead - number of rows to read in each chunk 
+overWrite - overwrite any outFiles of the same name that is already present 
+type - type of inData (.csv, .txt, etc.) 
+numRows - number of rows to import (if numRows is omitted or = -1, then all rows are imported) 
+maxRowsbyCols - total number of rows * cols to be specified in the output data frame. Default value is 3 million. This is applicable only when outFile is NULL and output is a data frame
+*/
+
+# start time for data import
+t_import_1 <- Sys.time()
+
+# specify numerical extensions in the filename of input files
+# the below means we want to read files four files - from 'card_test_001.csv' to 'card_test_004.csv'
+csvToRead <- c(001:004)
+
+# define data frame to store all file paths
+fileCsv <- data.frame("filePath"=character(), stringsAsFactors = F)
+
+# store all file paths in the data frame
+for (i in 1:length(csvToRead))
+{
+  fileCsv[i,1] <- file.path(dataDir, paste0("card_test_", csvToRead[i], ".csv"))
+}
+
+# define the file path of xdf to write data into
+fileXdf <- file.path(dataDir, paste0("card_test_", csvToRead[1], "-", csvToRead[length(csvToRead)], ".xdf"))
+if (file.exists(fileXdf)) { file.remove(fileXdf) }
+
+# data import: read from csv and write into xdf 
+for (i in 1:length(csvToRead))
+{
+  if (i == 1)
+  {
+    rxImport(inData = fileCsv[i,1], 
+             outFile = fileXdf,
+             varsToKeep = varsToKeep,
+             colInfo = colInfo,
+             rowsPerRead = 1000000,
+             overwrite = T,
+             type = "text" 
+            )
+  }
+  else
+  {
+    rxImport(inData = fileCsv[i,1], 
+             outFile = fileXdf,
+             varsToKeep = varsToKeep,
+             colInfo = colInfo,
+             rowsPerRead = 1000000,
+             append = "rows",
+             overwrite = T,
+             type = "text" 
+            )
+  }
+}
+
+# end time for data import
+t_import_2 <- Sys.time()
+
+# calculate import time in seconds
+Import_time <- difftime(t_import_2, t_import_1, units = "secs")
+Import_time
+
+# get info on the imported data for all variables
+rxGetInfo(fileXdf, getVarInfo = T)
+
+/*
+2. Data wrangling
+Here we need to standardize all the variables so that they can be on the same scale and none is preferred over the other just because of the range of data
+
+2.1. Standardize variables: Compute the summary stats - Mean and StdDev for all variables
+Functions Used:
+
+rxSummary() - used to produce univariate summaries (Mean, Standard Deviation, Min, Max, Valid Observations, Missing Observations) for all variables specified. Similar to summary() function in R
+Parameters:
+
+formula - variable names whose summary need to be calculated 
+data - file path of data frame or xdf 
+byTerm - logical variable. If TRUE, missings will be removed by term (by variable or by interaction expression) before computing summary statistics. If FALSE, observations with missings in any term will be removed before computations 
+*/
+
+# start time for data wrangling
+t_wrangling_1 <- Sys.time()
+
+# Compute the summary statistics
+dataSummary <- rxSummary(formula = ~., data = fileXdf, byTerm = TRUE)$sDataFrame
+#dataSummary[is.na(dataSummary$Mean),2] <- 0
+#dataSummary[is.na(dataSummary$StdDev),3] <- 1
+Statistics <- dataSummary[, c(1:3)]
+
+/*
+2.2. Standardize all numerical variables across the mean
+Standarize across mean using the below formula:
+
+xstandarized=( x−mean(x) ) / StdDev(x)
+ 
+Functions Used:
+
+rxDataStep() - used for data transformation. This function can be used to import, transform and export data
+Parameters:
+
+inData - file path of csv or xdf 
+outFile - file path of xdf (if outFile is omitted, then inData is loaded into RAM) 
+overWrite - overwrite any outFiles of the same name that is already present 
+transformFunc - call the function that defines the transformation logic 
+transformObjects - pass arguments into the transformFunc function 
+maxRowsbyCols - total number of rows * cols to be specified in the output data frame. Default value is 3 million. This is applicable only when outFile is NULL and output is a data frame
+
+*/
+
+# Function to standardize
+standardize <- function(data){
+  data <- data.frame(data)
+  for(n in 1:nrow(Stats)){
+      # check if mean is 'NA' then the column is categorical and hence need not be standardized
+      if (Stats[n,2] == "" | is.na(Stats[n,2]) | Stats[n,2] == "NA" | Stats[n,1] == "delinq")
+          { data[[Stats[n,1]]] <- data[[Stats[n,1]]] }
+      else
+          { data[[Stats[n,1]]] <- (data[[Stats[n,1]]] - Stats[n,2])/Stats[n,3] }
+  }
+  return(data)
+}
+
+# create new xdf file to write the standardized data
+fileXdf1 <- file.path(home,'temp_standardized.xdf')
+if (file.exists(fileXdf1)) { file.remove(fileXdf1) }
+
+# call the standardize function to transform dataset
+rxDataStep(inData = fileXdf, outFile = fileXdf1, overwrite = TRUE, transformFunc = standardize, 
+           transformObjects = list(Stats = Statistics)
+           )
+
+# end time of data wrangling
+t_wrangling_2 <- Sys.time()
+
+Data_wrangling_time <- difftime(t_wrangling_2, t_wrangling_1, units = "secs")
+Data_wrangling_time
+
+/*
+3. Data Split
+Split the dataset into train and test - train 90% and test 10%.
+
+Since, this is an imbalanced dataset, and the minority (delinq = 1) is just ~2% of the complete dataset, we need to undersample the 98% majority (delinq = 0) to such an extent that the final dataset has a 25% : 75% ratio of minority to majority
+
+3.1. 90-10 % split of total data - train90 and test10
+Functions Used:
+
+rxSplit() - used to split an input xdf file or data frame into multiple xdf files or a list of data frame
+Parameters:
+
+inData - file path of csv or xdf
+outFilesBase - a character string or vector defining the file names/paths to use in forming the the output xdf files
+numOut - number of output files or number of data frames returned in the output list
+reportProgress - report the progress of function execution based on specific values
+verbose - integer value. If 0, no additional output is printed. If 1, additional summary information is printed
+splitByFactor - character string identifying the name of the variable (which should be a factor) to use in splitting the inFile xdf data such that each file contains the data corresponding to a single level of the factor
+overwrite - overwrite any outFiles of the same name that is already present
+transforms - an expression of the form list(name = expression, ...) representing the first round of variable transformations
+rngSeed - random seed
+consoleOutput - report progress of function on console
+*/
+
+# start time of data split
+t_split_1 <- Sys.time()
+
+# declare path and filename
+train90 <- file.path(home, 'temp_train90.splitVar.train.xdf')
+test10 <- file.path(home, 'temp_test10.splitVar.test.xdf')
+if (file.exists(train90)) { file.remove(train90) }
+if (file.exists(test10)) { file.remove(test10) }
+
+# split function
+rxSplit(inData = fileXdf1, outFilesBase = file.path(home, c("temp_train90", "temp_test10")), 
+                    numOut = 2,
+                    reportProgress = 0, verbose = 0,
+                    splitByFactor = "splitVar",
+                    overwrite = TRUE,
+                    transforms = list(
+                      splitVar = factor(sample(c("train", "test"),
+                                               size = .rxNumRows,
+                                               replace = TRUE,
+                                               prob = c(.90, .10)),
+                                        levels = c("train", "test"))
+                                        ),
+                    rngSeed = 1,
+                    consoleOutput = TRUE)
+
+#rxGetInfo(train90, getVarInfo = T)
+
+# QC Steps - Check if both train and test has equal % of 1's in the data
+
+# train <- rxDataStep(inData = train90, maxRowsByCols = 3000000*100)
+# unique(train$splitVar)
+# sum(as.numeric(as.character(train$delinq))) / nrow(train)
+# test <- rxDataStep(inData = test10, maxRowsByCols = 3000000*100)
+# unique(test$splitVar)
+# sum(as.numeric(as.character(test$delinq))) / nrow(test)
+
+/*
+3.2. Out of the 90% split, separate 1's and 0's - delinq1 and delinq0
+*/
+
+# declare path and filename
+delinq1 <- file.path(home, 'temp_delinq1.delinq.1.xdf')
+delinq0 <- file.path(home, 'temp_delinq0.delinq.0.xdf')
+if (file.exists(delinq1)) { file.remove(delinq1) }
+if (file.exists(delinq0)) { file.remove(delinq0) }
+
+# split function
+rxSplit(inData = train90, outFilesBase = file.path(home, c("temp_delinq0", "temp_delinq1")), 
+                    numOut = 2,
+                    reportProgress = 0, verbose = 0,
+                    splitByFactor = "delinq",
+                    overwrite = TRUE,
+                    rngSeed = 1,
+                    consoleOutput = TRUE)
+                    
+/*
+3.3. Under-sample the delinq0 such that delinq1 to delinq0 ratio is 25:75
+Calculate under-sampling percentage as:
+
+PercentageUnderSample = (75/25) × ( numRowsofdelinq1 / numRowsofdelinq0 )
+
+*/
+
+# calculate percentage of undersampling that needs to be done
+Perc_UnderSample <- (75/25) * rxGetInfo(delinq1)[[2]] / rxGetInfo(delinq0)[[2]]
+
+# defining transform variable to be used in the transform function
+myTransform <- function(x){
+   Perc_UnderSample <- get("Perc_UnderSample", parent.frame())
+   return(Perc_UnderSample)
+}
+
+# declare path and filename of undersampled data
+delinq0_sample <- file.path(home, 'temp_delinq0_sample.xdf')
+if (file.exists(delinq0_sample)) { file.remove(delinq0_sample) }
+
+# transform function
+rxDataStep(inData = delinq0, outFile = delinq0_sample,
+            transforms = list(Perc_UnderSample = myTransform(x)), 
+            transformObjects = list(myTransform = myTransform, Perc_UnderSample = Perc_UnderSample),
+            rowSelection = as.logical(rbinom(.rxNumRows, 1, Perc_UnderSample)),
+            overwrite = TRUE)
+
+# the new dataset has an extra column with the percentage of undersampling - need to remove that
+data_UnderSampled <- file.path(home, 'temp_UnderSampledData.xdf')
+if (file.exists(data_UnderSampled)) { file.remove(data_UnderSampled) }
+
+rxDataStep(inData = delinq0_sample, outFile = data_UnderSampled,
+           varsToDrop = "Perc_UnderSample",
+            overwrite = TRUE)
+            
+/*
+3.4. After under-sampling of delinq0, append this to delinq1 and create the final under-sampled dataset to feed to model
+*/
+
+# final undersampled collated data
+rxDataStep(delinq1, data_UnderSampled, append = "rows")
+
+# end time for data split
+t_split_2 <- Sys.time()
+
+Data_split_time <- difftime(t_split_2, t_split_1, units = "secs")
+Data_split_time
+
+/*
+4. Model development
+4.1. Create working formula for model and build the model
+Functions Used:
+
+rxFastTrees() - used to build XGBoost model on data frame or xdf
+Parameters:
+
+formula - formula giving the relation of dependent variable ~ independent variables
+data - data frame or file path of xdf
+type - regression tree or classification tree
+numTrees - number of decision trees to build in the model
+learningRate - one step of learning in boosting models
+exampleFraction - number of rows/records to be taken for building each tree
+featureFraction - number of columns/features to be taken for building each tree
+numLeaves - The maximum number of leaves (terminal nodes) that can be created in any tree
+reportProgress - report progress of model build
+verbose - An integer value that specifies the amount of output wanted. If 0, no verbose output is printed during calculations. Integer values from 1 to 4 provide increasing amounts of information
+trainThreads - max number of cores to be used during model development
+randomSeed - random seed
+*/
+
+# start time for model development
+t_model_1 <- Sys.time()
+
+# Declare function to specify parameters for XGB model
+form <- formula(delinq ~ .)
+
+# Execute XGB model
+xgb.fasttrees <- rxFastTrees(formula = form, 
+                             data = data_UnderSampled,
+                             type = "binary",
+                             numTrees = 500, 
+                             learningRate = 0.05, 
+                             exampleFraction = 0.8,
+                             featureFraction = 0.8,
+                             numLeaves = 20,
+                             reportProgress = 2,
+                             verbose = 4,
+                             trainThreads = 8,
+                             randomSeed = 100 )
+
+# end time for model development
+t_model_2 <- Sys.time()
+
+Model_TrainTime <- difftime(t_model_2, t_model_1, units = "secs")
+Model_TrainTime
+
+/*
+5. Model Validation
+5.1. Use rxPredict to predict classifier on test dataset
+Use the unused sample test10 to predict model - this test dataset is imbalanced
+
+Functions Used:
+
+rxPredict() - used to predict and report per-instance scoring results in a data frame or RevoScaleR data source using a trained Microsoft R Machine Learning model with a RevoScaleR data source
+Parameters:
+
+modelObject - trained model object
+data - data frame or file path of xdf for the test dataset
+extraVarsToWrite - actual variables to write in the final dataframe for comparison
+overwrite - overwrite any outFiles of the same name that is already present
+*/
+
+# start time for model validation
+t_test_1 <- Sys.time()
+
+# predict function
+xgbPred <- rxPredict(modelObject = xgb.fasttrees, 
+                      data = test10, 
+                      extraVarsToWrite = 'delinq', 
+                      overwrite = T
+                    )
+
+/*
+5.2. ROC curve and AUC calculation
+Functions Used:
+
+rxRocCurve(), rxRoc() - used to compute and plot an ROC curve using actual and predicted values from binary classifier system
+rxAuc() - used to compute area under the curve of ROC curve built using rxRoc() function
+Parameters:
+
+actualVarName - traget variable used in model development
+predVarNames - predicted variable
+data - data frame for the predicted output
+title - title of the ROC curve plot
+*/
+
+#Testing model - using ROC curve and AUC value
+xgbPred$delinq <- as.numeric(as.character(xgbPred$delinq))
+
+# plot ROC curve for the classifier and write on a pdf file
+currentTime <- Sys.time() 
+pdfFileName <- paste0(home, "/roc_curve_", currentTime, ".pdf") 
+
+pdf(pdfFileName)
+
+rxRocObject <- rxRocCurve(actualVarName = "delinq", 
+                           predVarNames = "Probability.1",
+                           data = xgbPred,
+                           title ="ROC rxFastTrees Model of Binary Default - Card Collection data")
+
+plot(rxRocObject)
+dev.off()
+
+# calculate AUC
+AUC <- rxRoc(actualVarName = "delinq", 
+                predVarNames = "Probability.1",
+                data = xgbPred)
+AUC <- rxAuc(AUC)
+
+/*
+5.3. Confusion Matrix creation and extract as csv
+*/
+
+# Testing model - create Confusion Matrix
+library(caret)
+CM_results <- confusionMatrix(reference = xgbPred$delinq, data = xgbPred$PredictedLabel)
+CM <- data.frame(as.table(CM_results))
+CM <- cbind(CM, AUC)
+write.csv(CM, "CM_results.csv", row.names = F)
+
+# end time for model validation
+t_test_2 <- Sys.time()
+Predict_time <- difftime(t_test_2, t_test_1, units = "secs")
+Predict_time
+
+# script end time
+t_end <- Sys.time()
+Overall_time <- difftime(t_end, t_start, units = "secs")
+Overall_time
+
+/*
+6. Time collation
+*/
+
+# collate time for different modules
+Result <- cbind(as.data.frame(round(Import_time,4)), as.data.frame(round(Data_wrangling_time,4)), 
+                as.data.frame(round(Data_split_time,4)), as.data.frame(round(Model_TrainTime,4)), 
+                as.data.frame(round(Predict_time,4)), as.data.frame(round(Overall_time,4)))
+colnames(Result) <- c("Import_time", "Data_wrangling_time", "Data_split_time", "Model_TrainTime", "Model_PredictionTime", "Overall_Time")
+Result
+
+# extract all time in csv
+currentTime <- Sys.time()
+csvFileName <- paste0("Time_", currentTime, ".csv")
+write.csv(Result, csvFileName, row.names = FALSE)
+
+# File size of data used for model building
+file.info(data_UnderSampled)[[1]] / (1024*1024) 
+
+# File size of data used for model testing
+file.info(test10)[[1]] / (1024*1024) 
+
+# Get rownum of file input for model
+rxGetInfo(data_UnderSampled) 
+
+# Get rownum of file input for code
+rxGetInfo(fileXdf) 
+
+# Delete all intermediate XDF files created so far in the data directory
+unlink(paste0(home,"/temp_*.xdf"))
+
+/*
+The outputs from this script are:
+
+csv - run time collated for all script modules
+csv - confusion matrix and AUC value
+pdf - ROC curve for the classifier
+*/
+
+// ==============
+
+/*
+Addendum to the above script
+The below modules were used for variable selection for this specific dataset - card collection data. Below modules are only for data preparation and since these steps would be different across different datasets, these were not included in the benchmarking scripts
+*/
+
+/*
+1. Data import
+*/
+
+# data import - convert CSV to XDF
+fileCsv <- file.path(dataDir, "card_test_001.csv")
+
+# import first 3 million rows into data frame - 'data'
+data <- rxImport(inData = fileCsv, 
+                 numRows = 3000000,
+                 maxRowsByCols = 3000000*150,
+                 overwrite = T, 
+                 type = "text")
+                 
+# identify the nulls percentage in the data column
+null_counter <- apply(data, 2, function(x) length(which(x == "" | is.na(x) | x == "NA"))/length(x))
+
+# identify number of distinct values in each variable
+unique_counter <- apply(data, 2, function(x) length(unique(x, na.rm = T)))
+
+# get a data frame with column names of data and their respective null % and unique values
+variable_list <- cbind(as.data.frame(colnames(data)), 
+                       as.data.frame(null_counter), 
+                       as.data.frame(unique_counter))
+
+variable_list
+
+# select variables to drop which have more than 40% null values
+varsToDrop_1 <- variable_list[variable_list$null_counter >= 0.4, 1]
+# 14 variables selected
+
+# libraries required for Information Value calculation
+# Using package: "Information"
+
+library(Information)
+library(gridExtra)
+
+### Loading only numerical variables in the data
+dataFile1 <- dataFile
+dataFile1$delinq <- as.numeric(as.character(dataFile1$delinq))
+
+IV <- Information::create_infotables(data = dataFile1, y = "delinq", ncore = 8, parallel=TRUE)
+IV$Summary
+
+// === End
