@@ -1,0 +1,28 @@
+/*
+Objective:
+The objective of this experiment is to benchmark MRS on Card collection data using rxFastTrees model by evaluating runtimes across different modules of the code for different volumes of data
+
+Steps involved:
+Data Import - importing cards dataset from Test and Learn environment
+
+Data wrangling - filtering out variables required for modelling, changing these variables to required data types and Standardisation of variables across the mean
+
+Dataset split - spliting the the data into train and test data and performing undersampling to overcome imbalanced classes
+
+Model development - developing rxFastTrees model with various parameters
+
+Model validation - validating the prediction results using different evaluation techniques
+
+Time calculation - calculating runtimes across different modules of the code by time wrapping each modules
+
+N.B.: All the above modules (#1 to #5) are time-wrapped in order to calculate the execution time of each module. These runtimes are collated at the end of the script (#6) and taken out as output
+*/
+
+/*
+1. Data Import
+1.1. Set working directory and libraries
+Functions used:
+
+rxOptions() - the parameter numCoresToUse is used to specify the number of cores to be used by the script
+*/
+
