@@ -1,9 +1,9 @@
 /*
 Objective:
-The objective of this experiment is to benchmark MRS on Card collection data using rxFastTrees model by evaluating runtimes across different modules of the code for different volumes of data
+The objective of this experiment is to benchmark MRS on Cards data using rxFastTrees model by evaluating runtimes across different modules of the code for different volumes of data
 
 Steps involved:
-Data Import - importing cards dataset from Test and Learn environment
+Data Import - importing cards dataset in csv format
 
 Data wrangling - filtering out variables required for modelling, changing these variables to required data types and Standardisation of variables across the mean
 
@@ -47,6 +47,7 @@ library(RevoScaleR)
 Dataset: 17 M rows X 102 columns
 
 A random sample of the dataset showed columns that has more than 40% null values. All those variables were removed (14 variables). Information Value calculation on the radom sample showed that 22 variables were very weak predictors (IV < 0.02). Hence those variables were also removed. Remaining variables = 102 - 14 - 22 = 66.
+The scripts for IV calculation and variable selection is provided in the "addendum" section at the end of this script.
 
 This set of 66 variables includes the target variable 'delinq'
 
