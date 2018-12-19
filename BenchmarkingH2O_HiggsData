@@ -1,0 +1,350 @@
+/*
+
+Objective:
+The objective of this experiment is to create a structured XGBoost script which will be used to benchmark H2O by evaluating runtimes across different modules of the code for different volumes of data
+
+Steps involved:
+Data Import - import Higgs dataset, csv file
+
+Data wrangling - null treatment and Standardisation of variables across the mean
+
+Dataset split - spliting the the data into train and test data 
+
+Model development - developing XGBOost model with various parameters
+
+Model validation - validating the prediction results using different evaluation techniques
+
+Results Collation - calculating runtimes across different modules of the code by time wrapping each modules
+
+N.B.: All the above modules (#1 to #5) are time-wrapped in order to calculate the execution time of each module. These runtimes are collated at the end of the script (#6) and taken out as output
+
+*/
+
+/*
+1. Data Import
+1.1. Establish connection and initiate H2O cluster
+Functions used:
+
+h2o.init() - the parameter nthreads is used to assign the number of threads to work with
+*/
+
+# start time for the script
+t_start <- Sys.time()
+
+# setting up connections and initiating H2O cluster to work on
+library(h2o)
+h2o.init(nthreads = -1)
+
+/*
+1.2. Set working directory and libraries
+*/
+
+# set directory
+dataDir <- '/home/ratul/MRS/H2O'
+setwd(dataDir)
+
+/*
+Dataset: 4,000,000 rows X 29 columns
+
+Target variable = Survived
+
+1.3. Import data - csv to h2o frame
+Functions Used:
+
+h2o.importFile() - to write data from csv to h2o frame, which is in-memory dataframe.
+Parameters:
+
+path - file path of csv
+destination_frame - The unique hex key assigned to the imported file. If none is given, a key will automatically be generated based on the URL path
+*/
+
+# start time for data import
+t_import_1 <- Sys.time()
+
+## Data Import
+
+fileCsv <- "HIGGS"
+data.hex <- h2o.importFile(path = file.path(dataDir, paste0(fileCsv, ".csv")), destination_frame = "data.hex")
+
+# end time for data import
+t_import_2 <- Sys.time()
+
+# calculate import time in seconds
+Import_time <- difftime(t_import_2, t_import_1, units = "secs")
+Import_time
+
+# get info on the imported data for all variables
+class(data.hex)
+summary(data.hex)
+
+/*
+2. Data wrangling
+Here we need to perform null treatment and then standardize all numerical variables so that they can be on the same scale and none is preferred over the other just because of the range of data
+
+2.1. Null value treatment: Mean imputation
+Functions Used:
+
+h2o.impute() - used to replace all null values in a column with the column mean, median, mode as applicable
+Parameters:
+
+dataset - dataframe on which imputation needs to be done
+column - column on which imputation needs to be done
+method - "mean" and "median" for numerical variables, "mode" for categorical variable as per requirement
+*/
+
+# start time for data wrangling
+t_wrangling_1 <- Sys.time()
+
+### Naming response and peredictors
+response <- "V1"
+predictors <- setdiff(names(data.hex), c(response, "name")) 
+
+### Null value treatment - Mean Imputation
+for (i in 1:length(predictors))
+{
+  h2o.impute(data.hex, predictors[i], method = "mean") #since all predictors are numerical columns
+}
+
+#summary(data.hex)
+
+/*
+2.2. Standardize all numerical variables across the mean
+Standarize across mean using the below formula:
+
+xstandarized= ( x−mean(x) ) / StdDev(x)
+*/
+
+# Overwrite columns with standardized values
+for (i in 1:length(predictors))
+{
+    data.hex[, i] <- (data.hex[, i] - mean(data.hex[, i])) / sd(data.hex[, i])
+}
+
+# Converting required columns into factor
+data.hex$V1 <- as.factor(data.hex$V1)
+
+# end time of data wrangling
+t_wrangling_2 <- Sys.time()
+
+Data_wrangling_time <- difftime(t_wrangling_2, t_wrangling_1, units = "secs")
+Data_wrangling_time
+
+/*
+3. Data Split¶
+Split the dataset into train and test - train 80% and test 20%.
+
+3.1. 80-20 % split of total data - train and test
+Functions Used:
+
+h2o.splitFrame() - used to split an H2o frame into a list of data frames
+Parameters:
+
+data - file path of H2o frame
+ratios - A numeric value or array indicating the ratio of total rows contained in each split. Must total up to less than 1
+destination_frames - An array of frame IDs equal to the number of ratios specified plus one
+seed - Random seed
+*/
+
+# start time of data split
+t_split_1 <- Sys.time()
+
+# split dataframe into tarin and test dataframes as per required ratio
+splits <- h2o.splitFrame(data = data.hex, ratios = 0.8, 
+                         destination_frames = c("train.hex", "test.hex"),
+                         seed = 100)
+
+# extract train and test as separate dataframes from list
+train <- splits[[1]]
+test <- splits[[2]]
+
+## If undersampling needs to be done, consider the below syntax:
+
+## calculate percentage of undersampling that needs to be done
+# percUnderSample <- (60/40) * nrow(train[train$Survived == 1,]) / nrow(train[train$Survived == 0,])
+
+## separate all the event = 0
+# event0 <- train[train$Survived == 0,]
+
+## random sampling of event 0's to get to the required ratio
+# splits <- h2o.splitFrame(data = event0, ratios = percUnderSample, 
+                         destination_frames = c("event0_undersampled.hex", "event0_ignored.hex"),
+                         seed = 100)
+
+## undersampled events
+# event0_undersampled <- splits[[1]]
+
+/*
+3.4. After under-sampling of event0, append this to event1 and create the final under-sampled dataset to feed to model¶
+Functions Used:
+
+h2o.rbind() - used to append two dataframes
+Parameters:
+
+dataframe - dataframe 1
+dataframe - dataframe 2
+*/
+
+# separate all event = 1
+event1 <- train[train$Survived == 1,]
+
+# final undersampled datasets of 1's and 0's
+event_undersampled <- h2o.rbind(event0_undersampled, event1)
+
+# end time of data split
+t_split_2 <- Sys.time()
+
+Split_time <- difftime(t_split_2, t_split_1, units = "secs")
+Split_time
+
+/*
+4. Model development
+4.1. Create working formula for model and build the model
+Functions Used:
+
+h2o.xgboost() - used to build XGBoost model on H2O frame. h20.xgboost works only in Linux systems (as on 2nd Nov 2018)
+Parameters:
+
+formula - formula giving the relation of dependent variable ~ independent variables
+x - list of predictors
+y - response variable
+training_frame - H2O data frame on which model is to be built
+validation_frame - H2O data frame on which model is to be tested/validated
+distribution - classification or regression and different types of distribution, e.g. "bernoulli", "multinomial", "gaussian"
+ntrees - number of tress to build in the model
+learn_rate - learning rate or shrinkage of the model
+stopping_metric - specify the metric to use for early stopping. Few of the available options are - "deviance", "logloss", "mse", "rmse", "AUC" and "auto"
+sample_rate - number of rows to consider for building each tree
+col_sample_rate - number of columns to consider for building each tree
+seed - Random seed
+*/
+
+# start time for model development
+t_model_1 <- Sys.time()
+
+# Execute GBM model
+xgb <- h2o.xgboost(x = predictors, 
+                   y = response, 
+                   training_frame = train,
+                   validation_frame = test,
+                   ntrees= 100,
+                   learn_rate = 0.05,
+                   min_rows = 100,
+                   max_depth = 4,
+                   #stopping_rounds = 0,
+                   stopping_tolerance = 1e-3, 
+                   stopping_metric = "AUC",
+                   score_tree_interval = 50,
+                   sample_rate= 0.8,
+                   col_sample_rate = 0.8,
+                   seed = 100
+                  )
+
+# end time for model development
+t_model_2 <- Sys.time()
+
+Model_TrainTime <- difftime(t_model_2, t_model_1, units = "secs")
+Model_TrainTime
+
+/*
+5. Model Validation
+5.1. Predict classifier on test dataset
+Use the unused sample test to predict model - this test dataset is imbalanced
+
+Functions Used:
+
+h2o.predict() - used to predict scoring results in an H2O data frame
+Parameters:
+
+object - trained model object
+newdata - H2O frame for the test dataset
+*/
+
+# start time for model validation
+t_test_1 <- Sys.time()
+
+# predict function
+prediction <- h2o.predict(object = xgb, newdata = test)
+
+/*
+5.2. Performance calculation¶
+Functions Used:
+
+h2o.performance() - for a trained h2o model, compute its performance on the given dataset
+h2o.auc() - retrieves the AUC value from an H2OBinomialMetrics object
+h2o.recall() - function to return the recall value from the H2OBinomialMetrics object
+h2o.accuracy() - function to return the accuracy value from the H2OBinomialMetrics object
+h2o.confusionMatrix() - retrieve either a single or many confusion matrices from H2O objects
+Parameters:
+
+h2o.performance()
+model - trained model - an H2OModel object
+newdata - An H2OFrame. The model will make predictions on this dataset, and subsequently score them. The dataset should match the dataset that was used to train the model, in terms of column names, types, and dimensions
+h2o.auc()
+object - An H2OBinomialMetrics object
+h2o.recall(), h2o.accuracy()
+object - An H2OBinomialMetrics object
+threshold - a value > 0 and < 1, which decides the cutoff, above which all prediction values are considered as 1
+h2o.confusionMatrix()
+object - Either an H2OModel object or an H2OModelMetrics object
+newdata - An H2OFrame object that can be scored on. Requires a valid response column
+valid - Retrieve the validation metric. If TRUE, then Confusion matrix is built on the validation dataset, else the train dataset
+*/
+
+# calculate performance of model on the tests dataset
+perf <- h2o.performance(model = xgb, newdata = test)
+Test_AUC <- h2o.auc(perf)
+Test_recall <- h2o.recall(perf, threshold = 0.5)
+Test_accuracy <- h2o.accuracy(perf, threshold = 0.5)
+
+# valid = T ensures that confusion matrix is created on the test (or validation) dataset and not on train data
+CM <- h2o.confusionMatrix(xgb, valid = T)
+CM <- as.data.frame(CM)
+temp <- data.frame(c(0, 1, "Totals"))
+colnames(temp) <- "LabelsDown_Actual.LabelsAcross_Pred"
+Result_CM <- cbind(temp, CM)
+
+# end time for model validation
+t_test_2 <- Sys.time()
+
+Predict_time <- difftime(t_test_2, t_test_1, units = "secs")
+Predict_time
+
+# script end time
+t_end <- Sys.time()
+
+Overall_time <- difftime(t_end, t_start, units = "secs")
+Overall_time
+
+/*
+6. Results collation
+*/
+
+# collate time for different modules
+Result_time <- cbind(as.data.frame(round(Import_time,4)), as.data.frame(round(Wrangling_time,4)), 
+                as.data.frame(round(Split_time,4)), as.data.frame(round(Model_TrainTime,4)), 
+                as.data.frame(round(Predict_time,4)), as.data.frame(round(Overall_time,4)),
+                as.data.frame(round(Test_AUC,4)), as.data.frame(round(Test_recall,4)),
+                as.data.frame(round(Test_accuracy,4))
+               )
+colnames(Result_time) <- c("Import_time", "Data_wrangling_time", "Data_split_time", "Model_TrainTime", 
+                      "Model_PredictionTime", "Overall_Time", "Test_AUC", "Test_recall", "Test_accuracy")
+Result_time
+
+# extract all time in csv
+currentTime <- Sys.time()
+csvFileName <- paste0("Results_XGB_time_", fileCsv, "_", currentTime, ".csv")
+write.csv(Result_time, csvFileName, row.names = F)
+
+# extract Confusion Matrix in csv
+csvFileName <- paste0("Results_XGB_CM_", fileCsv, "_", currentTime, ".csv")
+write.csv(Result_CM, csvFileName, row.names = F)
+
+/*
+The outputs from this script are:
+
+Results_XGB_time.csv - run time collated for all script modules
+Results_XGB_CM.csv - Confusion Matrix created
+*/
+
+// ==== End
+
